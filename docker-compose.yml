@@ -1,0 +1,170 @@
+version: '3.7'
+
+networks:
+  swarmonitor:
+      driver: overlay
+
+volumes:
+    prometheus: {}
+    grafana: {}
+    alertmanager: {}
+
+configs:
+  node_rules:
+    file: ./prometheus/swarm_node.rules.yml
+  task_rules:
+    file: ./prometheus/swarm_task.rules.yml
+  prometheus_config:
+    file: ./prometheus/prometheus.yml
+
+services:
+  cadvisor:
+    image: google/cadvisor
+    networks:
+      - swarmonitor
+    command: -logtostderr -docker_only
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /var/run:/var/run
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+      labels:
+        - traefik.frontend.rule=Host:cadvisor.swarm.cluster
+        - traefik.enable=true
+        - traefik.port=8080
+
+  grafana:
+    image: grafana/grafana
+    networks:
+      - swarmonitor
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=adminadmin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana:/var/lib/grafana
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+      labels:
+        - traefik.frontend.rule=Host:grafana.swarm.cluster
+        - traefik.enable=true
+        - traefik.port=3000
+
+  alertmanager:
+    image: prom/alertmanager
+    networks:
+      - swarmonitor
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+      labels:
+        - traefik.frontend.rule=Host:alerts.swarm.cluster
+        - traefik.enable=true
+        - traefik.port=9093
+
+  node-exporter:
+    image: prom/node-exporter
+    networks:
+      - swarmonitor
+    environment:
+      - NODE_ID={{.Node.ID}}
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      - /etc/hostname:/etc/nodename
+    command:
+      - '--path.sysfs=/host/sys'
+      - '--path.procfs=/host/proc'
+      - '--collector.textfile.directory=/etc/node-exporter/'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--no-collector.ipvs'
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+
+  prometheus:
+    image: prom/prometheus
+    networks:
+      - swarmonitor
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention=24h'
+    volumes:
+      - prometheus:/prometheus
+    configs:
+      - source: node_rules
+        target: /etc/prometheus/swarm_node.rules.yml
+      - source: task_rules
+        target: /etc/prometheus/swarm_task.rules.yml
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 128M
+      labels:
+        - traefik.frontend.rule=Host:prometheus.swarm.cluster
+        - traefik.enable=true
+        - traefik.port=9090
+
+
+  traefik:
+    image: traefik
+    networks:
+      - swarmonitor
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    command: --web --docker.swarmmode --docker.domain=traefik --docker.watch --docker.endpoint=unix://var/run/docker.sock -l INFO --web.metrics.prometheus --web.metrics.prometheus.buckets="0.1,0.3,1.2,5.0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 128M
